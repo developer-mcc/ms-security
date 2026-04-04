@@ -1,0 +1,411 @@
+{
+	"info": {
+		"name": "ms-security",
+		"description": "Coleccion de endpoints del microservicio de seguridad",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:8080"
+		},
+		{
+			"key": "accessToken",
+			"value": ""
+		},
+		{
+			"key": "targetUserId",
+			"value": "550e8400-e29b-41d4-a716-446655440000"
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{accessToken}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "Auth",
+			"item": [
+				{
+					"name": "Registro publico",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"username\": \"cajero01\",\n    \"password\": \"Admin2024!@#$\",\n    \"email\": \"cajero01@farmacia.pe\",\n    \"celular\": \"951234567\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/register",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "register"]
+						},
+						"description": "Registro publico de usuario. Valida fortaleza de password OWASP y unicidad de username/email. Responde 201 o 409 si ya existe."
+					}
+				},
+				{
+					"name": "SEQ_01 - Login",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var json = pm.response.json();",
+									"    pm.collectionVariables.set('accessToken', json.accessToken);",
+									"    console.log('accessToken guardado');",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"username\": \"cajero01\",\n    \"password\": \"Admin2024!@#$\",\n    \"branchId\": \"SUC-001\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/login",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "login"]
+						},
+						"description": "SEQ_01 - Login con reintentos OWASP.\nResponde 200 con accessToken, 401 credenciales invalidas, 423 usuario bloqueado, 429 rate limit."
+					}
+				},
+				{
+					"name": "SEQ_01 - Login (password incorrecto)",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"username\": \"cajero01\",\n    \"password\": \"wrongPassword\",\n    \"branchId\": \"SUC-001\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/login",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "login"]
+						},
+						"description": "Simula password incorrecto. Despues de 5 intentos, el usuario se bloquea (423 Locked)."
+					}
+				},
+				{
+					"name": "SEQ_03 - Logout",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/auth/logout",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "logout"]
+						},
+						"description": "SEQ_03 - Logout. Revoca access token y refresh token. Limpia cookie."
+					}
+				},
+				{
+					"name": "SEQ_05 - Logout por inactividad",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/auth/logout?reason=idle",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "logout"],
+							"query": [
+								{
+									"key": "reason",
+									"value": "idle"
+								}
+							]
+						},
+						"description": "SEQ_05 - Cierre por inactividad HIPAA 15 min. Registra evento IDLE_TIMEOUT en audit_log."
+					}
+				},
+				{
+					"name": "SEQ_04 - Refresh Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var json = pm.response.json();",
+									"    pm.collectionVariables.set('accessToken', json.accessToken);",
+									"    console.log('accessToken renovado');",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "refreshToken=<pegar_refresh_token_de_login>"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/auth/refresh",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "refresh"]
+						},
+						"description": "SEQ_04 - Refresh token con rotacion atomica. Envia el refreshToken via cookie, recibe nuevo accessToken + nuevo refreshToken."
+					}
+				}
+			]
+		},
+		{
+			"name": "Password",
+			"item": [
+				{
+					"name": "SEQ_06 - Cambiar password",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"actual\": \"Admin2024!@#$\",\n    \"nuevo\": \"NuevoPass2025!@#\",\n    \"canal\": \"EMAIL\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/change-password",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "change-password"]
+						},
+						"description": "SEQ_06 - Cambio de password autenticado. Revoca todos los tokens y fuerza re-login. Canal: EMAIL, SMS, WHATSAPP."
+					}
+				},
+				{
+					"name": "SEQ_07 Paso 1 - Forgot password (Email)",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"identifier\": \"cajero01@farmacia.pe\",\n    \"canal\": \"EMAIL\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/forgot-password",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "forgot-password"]
+						},
+						"description": "SEQ_07 Paso 1 - Solicitar codigo de reset. OWASP: siempre responde 200 sin revelar si el usuario existe."
+					}
+				},
+				{
+					"name": "SEQ_07 Paso 1 - Forgot password (SMS)",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"identifier\": \"951234567\",\n    \"canal\": \"SMS\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/forgot-password",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "forgot-password"]
+						},
+						"description": "SEQ_07 Paso 1 - Solicitar codigo de reset via SMS."
+					}
+				},
+				{
+					"name": "SEQ_07 Paso 1 - Forgot password (WhatsApp)",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"identifier\": \"951234567\",\n    \"canal\": \"WHATSAPP\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/forgot-password",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "forgot-password"]
+						},
+						"description": "SEQ_07 Paso 1 - Solicitar codigo de reset via WhatsApp."
+					}
+				},
+				{
+					"name": "SEQ_07 Paso 2 - Reset password",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"token\": \"123456\",\n    \"nuevaPassword\": \"ResetPass2025!@#\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/reset-password",
+							"host": ["{{baseUrl}}"],
+							"path": ["auth", "reset-password"]
+						},
+						"description": "SEQ_07 Paso 2 - Verificar OTP y establecer nueva password. El token es el codigo de 6 digitos recibido por el canal."
+					}
+				}
+			]
+		},
+		{
+			"name": "Admin",
+			"item": [
+				{
+					"name": "Crear usuario (Admin)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"username\": \"cajero02\",\n    \"password\": \"Admin2024!@#$\",\n    \"email\": \"cajero02@farmacia.pe\",\n    \"celular\": \"951234568\",\n    \"activo\": true\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/admin/usuarios",
+							"host": ["{{baseUrl}}"],
+							"path": ["admin", "usuarios"]
+						},
+						"description": "Admin crea usuario. Requiere rol ADMIN. Permite setear activo=true/false."
+					}
+				},
+				{
+					"name": "Listar roles",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/admin/roles",
+							"host": ["{{baseUrl}}"],
+							"path": ["admin", "roles"]
+						},
+						"description": "Lista todos los roles activos con sus permisos. Requiere permiso ROLES_GESTIONAR."
+					}
+				},
+				{
+					"name": "Asignar rol a usuario",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"codigoRol\": \"CAJERO\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/admin/usuarios/{{targetUserId}}/roles",
+							"host": ["{{baseUrl}}"],
+							"path": ["admin", "usuarios", "{{targetUserId}}", "roles"]
+						},
+						"description": "Asigna un rol a un usuario. Requiere permiso ROLES_GESTIONAR. Codigos: ADMIN, SUPERVISOR, CAJERO, FARMACEUTICO."
+					}
+				},
+				{
+					"name": "Quitar rol de usuario",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/admin/usuarios/{{targetUserId}}/roles/CAJERO",
+							"host": ["{{baseUrl}}"],
+							"path": ["admin", "usuarios", "{{targetUserId}}", "roles", "CAJERO"]
+						},
+						"description": "Quita un rol de un usuario. Requiere permiso ROLES_GESTIONAR."
+					}
+				},
+				{
+					"name": "SEQ_08 - Revocar sesiones de usuario",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/admin/usuarios/{{targetUserId}}/sesiones",
+							"host": ["{{baseUrl}}"],
+							"path": ["admin", "usuarios", "{{targetUserId}}", "sesiones"]
+						},
+						"description": "SEQ_08 - Admin revoca todas las sesiones de un usuario. Requiere rol ADMIN. Responde con cantidad de tokens revocados."
+					}
+				}
+			]
+		}
+	]
+}

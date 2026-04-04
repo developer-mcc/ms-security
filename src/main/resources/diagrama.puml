@@ -1,0 +1,539 @@
+
+@startuml SEQ_01_Login_Reintentos
+!theme plain
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceGroupBorderThickness 1
+skinparam responseMessageBelowArrow true
+
+title Secuencia 01 - Login con reintentos OWASP
+
+actor "Usuario" as U
+participant "Angular 20" as ANG
+participant "RateLimitFilter" as RATE
+participant "AuthController" as CTR
+participant "LoginAttemptService" as ATTEMPT
+participant "AuthService" as SVC
+participant "TokenService" as TOKEN
+participant "AuditService" as AUDIT
+database "PostgreSQL" as PG
+database "Redis" as RDS
+
+U -> ANG : ingresa usuario y password
+ANG -> RATE : POST /auth/login\n{username, password, branchId}
+
+group rate limit por IP - Bucket4j
+  alt supera 5 req/min
+    RATE --> ANG : 429 Too Many Requests\nRetry-After: 60s
+  else dentro del limite
+    RATE -> CTR : forward request
+  end
+end
+
+CTR -> ATTEMPT : estaBloqueado(username)
+ATTEMPT -> RDS : GET blocked:{username}
+
+alt usuario bloqueado
+  ATTEMPT --> CTR : true - bloqueadoHasta
+  CTR -> AUDIT : registrar(USUARIO_BLOQUEADO_INTENTO)
+  AUDIT -> PG : INSERT audit_log
+  CTR --> ANG : 423 Locked\n{mensaje, bloqueadoHasta}
+
+else usuario no bloqueado
+  CTR -> SVC : autenticar(username, password, ip)
+  SVC -> PG : SELECT usuario WHERE username AND activo=true
+
+  alt usuario no existe
+    SVC --> CTR : UsuarioNoEncontradoException
+    CTR -> ATTEMPT : registrarIntento(username, ip, false)
+    ATTEMPT -> PG : INSERT login_intentos
+    note over CTR : OWASP: mismo mensaje\npara user inexistente\ny password incorrecto
+    CTR --> ANG : 401\n{mensaje: "Credenciales invalidas"}
+
+  else usuario existe
+    SVC -> SVC : BCrypt.verify(password, hash)
+
+    alt password incorrecto
+      SVC --> CTR : BadCredentialsException
+      CTR -> ATTEMPT : registrarIntento(username, ip, false)
+      ATTEMPT -> PG : INSERT login_intentos
+      ATTEMPT -> ATTEMPT : contarFallidos(username)
+
+      alt intentos >= max_configurado
+        ATTEMPT -> RDS : SET blocked:{username}\nTTL = tiempo_bloqueo_minutos
+        ATTEMPT -> PG : INSERT usuarios_bloqueados
+        CTR -> AUDIT : registrar(USUARIO_BLOQUEADO)
+        AUDIT -> PG : INSERT audit_log
+        CTR --> ANG : 423 Locked\n{desbloqueadoEn, intentos}
+      else intentos < max
+        CTR --> ANG : 401\n{mensaje, intentosRestantes}
+      end
+
+    else password correcto
+      CTR -> ATTEMPT : registrarIntento(username, ip, true)
+      ATTEMPT -> PG : INSERT login_intentos exitoso=true
+      ATTEMPT -> PG : DELETE intentos fallidos previos
+      ATTEMPT -> RDS : DEL blocked:{username}
+
+      SVC -> TOKEN : emitirAccessToken(user)
+      TOKEN -> TOKEN : buildJWT(sub, branchId, roles, jti, exp=15m)
+      TOKEN -> PG : INSERT tokens_sesion\n{jti, ACTIVO, emitido_en}
+      TOKEN --> SVC : accessToken JWT
+
+      SVC -> TOKEN : emitirRefreshToken(userId)
+      TOKEN -> PG : INSERT tokens_sesion\n{tipo=REFRESH, ACTIVO}
+      TOKEN -> RDS : SET refresh:{userId} TTL=7d
+      TOKEN --> SVC : refreshToken opaco
+
+      SVC -> AUDIT : registrar(LOGIN_OK)
+      AUDIT -> PG : INSERT audit_log
+
+      SVC --> CTR : AuthResponse
+      CTR --> ANG : 200\n{accessToken}\nSet-Cookie: refreshToken httpOnly Secure
+    end
+  end
+end
+
+@enduml
+
+
+@startuml SEQ_02_Validacion_Token_Request
+!theme plain
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam responseMessageBelowArrow true
+
+title Secuencia 02 - Validacion de token en cada request
+
+actor "Usuario" as U
+participant "Angular 20" as ANG
+participant "SecurityFilterChain" as FILT
+participant "TokenService" as TOKEN
+participant "AuditService" as AUDIT
+database "PostgreSQL" as PG
+database "Redis" as RDS
+participant "BFF :8082" as BFF
+
+U -> ANG : ejecuta accion en POS
+ANG -> FILT : request + Authorization: Bearer JWT
+
+FILT -> FILT : extraer JWT del header Authorization
+FILT -> TOKEN : validarToken(jwt)
+TOKEN -> TOKEN : verificar firma RS256\ncon clave publica
+
+alt firma invalida
+  TOKEN --> FILT : SignatureException
+  FILT -> AUDIT : registrar(TOKEN_FIRMA_INVALIDA)
+  AUDIT -> PG : INSERT audit_log
+  FILT --> ANG : 401 TOKEN_INVALID
+
+else firma valida
+  TOKEN -> TOKEN : extraer claim jti del JWT
+  TOKEN -> RDS : GET blacklist:{jti}
+
+  alt jti en blacklist Redis
+    TOKEN --> FILT : TokenRevocadoException
+    FILT -> AUDIT : registrar(TOKEN_REVOCADO_INTENTO)
+    AUDIT -> PG : INSERT audit_log
+    FILT --> ANG : 401 TOKEN_REVOKED
+
+  else jti no en blacklist
+    TOKEN -> TOKEN : verificar claim exp
+
+    alt token expirado
+      TOKEN --> FILT : ExpiredJwtException
+      FILT --> ANG : 401 TOKEN_EXPIRED
+
+    else token vigente
+      TOKEN -> PG : SELECT tokens_sesion\nWHERE jti=? AND estado=ACTIVO
+      note over TOKEN : doble verificacion BD\ngarantia ante fallo Redis
+
+      alt token revocado en BD
+        TOKEN --> FILT : TokenRevocadoException
+        TOKEN -> RDS : SET blacklist:{jti} TTL=exp-now
+        note over TOKEN : re-sincroniza Redis\ncon estado real de BD
+        FILT --> ANG : 401 TOKEN_REVOKED
+
+      else token activo en BD
+        TOKEN -> PG : UPDATE tokens_sesion\nSET ultimo_uso=NOW()
+        TOKEN --> FILT : Claims{userId, branchId, roles}
+        FILT -> FILT : SecurityContextHolder\n.setAuthentication(token)
+        FILT -> BFF : forward request\n+ X-Auth-UserId\n+ X-Auth-BranchId\n+ X-Auth-Roles
+        BFF --> FILT : response
+        FILT --> ANG : 200 response
+      end
+    end
+  end
+end
+
+@enduml
+
+
+@startuml SEQ_03_Logout_Invalidacion
+!theme plain
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam responseMessageBelowArrow true
+
+title Secuencia 03 - Logout y revocacion inmediata de token
+
+actor "Usuario" as U
+participant "Angular 20" as ANG
+participant "SecurityFilterChain" as FILT
+participant "TokenService" as TOKEN
+participant "AuditService" as AUDIT
+database "PostgreSQL" as PG
+database "Redis" as RDS
+
+U -> ANG : clic en Cerrar Sesion
+
+ANG -> FILT : POST /auth/logout\nAuthorization: Bearer JWT
+
+FILT -> TOKEN : extraer jti y exp del JWT
+TOKEN -> PG : UPDATE tokens_sesion\nSET estado=REVOCADO_LOGOUT\nSET revocado_en=NOW()\nWHERE jti=?
+TOKEN -> RDS : SET blacklist:{jti}\nTTL = exp - NOW()
+note over RDS : TTL exacto: no\ndesperdicia espacio\nse limpia automatico
+
+TOKEN -> RDS : DEL refresh:{userId}
+TOKEN -> PG : UPDATE tokens_sesion\nSET estado=REVOCADO_LOGOUT\nWHERE userId=? AND tipo=REFRESH
+
+TOKEN --> FILT : OK
+
+FILT -> AUDIT : registrar(LOGOUT, userId, ip, userAgent)
+AUDIT -> PG : INSERT audit_log\n{evento=LOGOUT}
+
+FILT --> ANG : 200 {loggedOut: true}\nClear-Cookie: refreshToken
+ANG -> ANG : limpiar store\nlimpiar accessToken memoria
+ANG --> U : redirect /login
+
+@enduml
+
+
+@startuml SEQ_04_Refresh_Token
+!theme plain
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam responseMessageBelowArrow true
+
+title Secuencia 04 - Refresh token y rotacion
+
+actor "Usuario" as U
+participant "Angular 20\nHttpInterceptor" as ANG
+participant "AuthController" as CTR
+participant "TokenService" as TOKEN
+participant "AuditService" as AUDIT
+database "PostgreSQL" as PG
+database "Redis" as RDS
+
+note over ANG : intercepta 401 TOKEN_EXPIRED\nen cualquier request
+
+ANG -> CTR : POST /auth/refresh\nCookie: refreshToken
+
+CTR -> TOKEN : validarRefreshToken(refreshToken)
+TOKEN -> RDS : GET refresh:{userId}
+
+alt refresh no existe o expirado
+  TOKEN --> CTR : RefreshTokenInvalidoException
+  CTR -> AUDIT : registrar(REFRESH_INVALIDO)
+  AUDIT -> PG : INSERT audit_log
+  CTR --> ANG : 401 SESSION_EXPIRED
+  ANG --> U : redirect /login?reason=session_expired
+
+else refresh valido
+  TOKEN -> TOKEN : rotacion atomica
+  TOKEN -> RDS : DEL refresh:{userId} viejo
+  TOKEN -> RDS : SET refresh:{userId} nuevo TTL=7d
+  TOKEN -> PG : UPDATE token viejo\nSET estado=REVOCADO_ROTACION
+  TOKEN -> TOKEN : buildJWT nuevo\n(sub, branchId, roles, jti nuevo, exp=15m)
+  TOKEN -> PG : INSERT tokens_sesion nuevo\n{jti nuevo, ACTIVO}
+  TOKEN --> CTR : {newAccessToken, newRefreshToken}
+  CTR --> ANG : 200 {accessToken}\nSet-Cookie: refreshToken nuevo httpOnly
+  ANG -> ANG : actualiza accessToken en memoria
+  ANG -> ANG : reintenta request original
+end
+
+@enduml
+
+
+@startuml SEQ_05_Inactividad_HIPAA
+!theme plain
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam responseMessageBelowArrow true
+
+title Secuencia 05 - Cierre por inactividad 15 min HIPAA
+
+actor "Usuario\nCajero" as U
+participant "Angular 20\nInactivityService" as ANG
+participant "AuthController" as CTR
+participant "TokenService" as TOKEN
+participant "AuditService" as AUDIT
+database "PostgreSQL" as PG
+database "Redis" as RDS
+
+note over ANG : escucha: mousemove\nkeydown, click\ntouchstart, scroll
+
+loop cada evento de usuario
+  U -> ANG : interaccion
+  ANG -> ANG : resetTimer()\nwarnTimer = 14min\nexpireTimer = 15min
+end
+
+note over ANG : 14 minutos sin actividad
+
+ANG -> ANG : dispara warnTimer
+ANG -> U : muestra modal\n"Sesion expira en 60s"
+
+alt usuario responde - extiende sesion
+  U -> ANG : clic en Continuar Sesion
+  ANG -> CTR : POST /auth/refresh\nCookie: refreshToken
+  CTR -> TOKEN : rotarRefreshToken(refreshToken)
+  TOKEN -> RDS : DEL viejo + SET nuevo TTL=7d
+  TOKEN -> PG : UPDATE viejo REVOCADO\nINSERT nuevo ACTIVO
+  TOKEN --> CTR : {newAccessToken}
+  CTR --> ANG : 200 {accessToken}\nSet-Cookie: refreshToken nuevo
+  ANG -> ANG : resetTimer()
+  ANG --> U : cierra modal\ncontinua sesion
+
+else usuario no responde - 15 min cumplidos
+  ANG -> ANG : dispara expireTimer
+  ANG -> CTR : POST /auth/logout?reason=idle\nAuthorization: Bearer JWT
+
+  CTR -> TOKEN : revocarToken(jti, exp, REVOCADO_IDLE)
+  TOKEN -> PG : UPDATE tokens_sesion\nSET estado=REVOCADO_IDLE\nSET revocado_en=NOW()
+  TOKEN -> RDS : SET blacklist:{jti} TTL=exp-now
+  TOKEN -> RDS : DEL refresh:{userId}
+  TOKEN -> PG : UPDATE refresh\nSET estado=REVOCADO_IDLE
+
+  CTR -> AUDIT : registrar(IDLE_TIMEOUT)
+  AUDIT -> PG : INSERT audit_log\n{evento=IDLE_TIMEOUT\ndetalle: {minutos: 15}}
+
+  CTR --> ANG : 200 {loggedOut: true}
+  ANG -> ANG : limpiar store y memoria
+  ANG --> U : redirect /login?reason=idle\nmensaje: "Sesion cerrada\npor inactividad"
+end
+
+@enduml
+
+
+@startuml SEQ_06_Cambio_Password
+!theme plain
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam responseMessageBelowArrow true
+
+title Secuencia 06 - Cambio de password autenticado
+
+actor "Usuario" as U
+participant "Angular 20" as ANG
+participant "PasswordController" as CTR
+participant "PasswordService" as SVC
+participant "TokenService" as TOKEN
+participant "NotificationService" as NOTIF
+participant "AuditService" as AUDIT
+database "PostgreSQL" as PG
+database "Redis" as RDS
+
+U -> ANG : ingresa password actual\ny nuevo password\nselecciona canal notificacion
+ANG -> CTR : POST /auth/change-password\n{actual, nuevo, canal}\nBearer JWT
+
+CTR -> SVC : cambiarPassword(userId, actual, nuevo, canal)
+
+SVC -> SVC : validarFortaleza(nuevo)
+note over SVC : OWASP ASVS v4.0\nmin 12 caracteres\nmayusculas + numeros\ncaracteres especiales\nno igual al username\nno en historial reciente
+
+alt password nuevo debil
+  SVC --> CTR : PasswordDebilException\n{reglas: [...]}
+  CTR --> ANG : 400\n{errores: [lista de reglas]}
+
+else password fuerte
+  SVC -> PG : SELECT password_hash\nWHERE userId
+  SVC -> SVC : BCrypt.verify(actual, hash)
+
+  alt password actual incorrecto
+    SVC --> CTR : BadCredentialsException
+    CTR --> ANG : 401 Credenciales invalidas
+
+  else password actual correcto
+    SVC -> PG : SELECT historial_passwords\nWHERE userId\nORDER BY cambiado_en DESC\nLIMIT historial_configurado
+
+    SVC -> SVC : verificarNoRepetido(nuevo, historial)
+
+    alt password repetido en historial
+      SVC --> CTR : PasswordRepetidoException
+      CTR --> ANG : 400 Password ya usado\nrecientemente
+
+    else password unico
+      SVC -> PG : UPDATE usuarios\nSET password_hash=BCrypt(nuevo)
+      SVC -> PG : INSERT historial_passwords\n{userId, hash, cambiado_en}
+
+      SVC -> TOKEN : revocarTodosTokens(userId)
+      TOKEN -> PG : SELECT todos jti ACTIVOS\nWHERE userId
+      TOKEN -> PG : UPDATE tokens_sesion\nSET estado=REVOCADO_PASSWORD\nWHERE userId
+      TOKEN -> RDS : SET blacklist:{jti} TTL=exp-now\npara cada token activo
+      TOKEN -> RDS : DEL refresh:{userId}
+
+      SVC -> AUDIT : registrar(PASSWORD_CAMBIADO)
+      AUDIT -> PG : INSERT audit_log
+
+      SVC -> NOTIF : notificar(userId, canal,\n"Password cambiado")
+      NOTIF --> ANG : canal notificado
+
+      SVC --> CTR : OK
+      CTR --> ANG : 200 {mensaje: "Password actualizado"}\nClear-Cookie: refreshToken
+      ANG --> U : redirect /login\nmensaje: sesion cerrada\npor cambio de password
+    end
+  end
+end
+
+@enduml
+
+
+@startuml SEQ_07_Reset_Password_Multicanal
+!theme plain
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam responseMessageBelowArrow true
+
+title Secuencia 07 - Reset de password por canal SMS / Email / WhatsApp
+
+actor "Usuario" as U
+participant "Angular 20" as ANG
+participant "PasswordController" as CTR
+participant "PasswordService" as SVC
+participant "NotificationService" as NOTIF
+participant "EmailNotifier" as EMAIL
+participant "SmsNotifier" as SMS
+participant "WhatsAppNotifier" as WA
+participant "AuditService" as AUDIT
+database "PostgreSQL" as PG
+database "Redis" as RDS
+
+== Paso 1: Solicitar codigo de reset ==
+
+U -> ANG : ingresa email o celular\nselecciona canal
+ANG -> CTR : POST /auth/forgot-password\n{identifier, canal}
+
+CTR -> SVC : solicitarReset(identifier, canal)
+SVC -> PG : SELECT usuario\nWHERE email=? OR celular=?
+
+note over SVC : OWASP: responder 200 siempre\nno revelar si existe el usuario\npreviene enumeracion
+
+SVC -> SVC : generarOTP(6 digitos)\nvalido una sola vez
+
+SVC -> PG : INSERT password_reset_tokens\n{userId, token, canal\nexpiraEn=NOW()+15min}
+SVC -> RDS : SET reset:{token} userId\nTTL = reset_token_exp_minutos
+
+SVC -> NOTIF : enviarCodigo(destino, canal, otp)
+
+alt canal = EMAIL
+  NOTIF -> EMAIL : enviar(email,\n"Codigo recuperacion FarmaciaX",\n"Tu codigo es: XXXXXX\nVigente 15 minutos")
+else canal = SMS
+  NOTIF -> SMS : enviar(celular,\n"FarmaciaX: Tu codigo es XXXXXX.\nVigente 15min. No compartir.")
+else canal = WHATSAPP
+  NOTIF -> WA : enviar(celular,\nmensaje template aprobado Meta\ncon codigo XXXXXX)
+end
+
+SVC -> AUDIT : registrar(PASSWORD_RESET_SOLICITADO)
+AUDIT -> PG : INSERT audit_log\n{canal, destino enmascarado}
+
+SVC --> CTR : OK
+CTR --> ANG : 200\n{mensaje: "Codigo enviado si el usuario existe"}
+
+== Paso 2: Verificar codigo y nueva password ==
+
+U -> ANG : ingresa codigo recibido\ne ingresa nueva password
+ANG -> CTR : POST /auth/reset-password\n{token, nuevaPassword}
+
+CTR -> SVC : resetearPassword(token, nuevaPassword)
+SVC -> RDS : GET reset:{token}
+
+alt token no existe en Redis
+  SVC --> CTR : TokenInvalidoException
+  CTR --> ANG : 400 Token invalido o expirado
+
+else token existe
+  SVC -> PG : SELECT reset_token\nWHERE token=? AND usado=false
+
+  alt token ya usado
+    SVC --> CTR : TokenYaUsadoException
+    CTR --> ANG : 400 Token ya utilizado
+
+  else token valido
+    SVC -> SVC : validarFortaleza(nuevaPassword)
+
+    alt password debil
+      SVC --> CTR : PasswordDebilException
+      CTR --> ANG : 400 {reglas incumplidas}
+
+    else password fuerte
+      SVC -> PG : UPDATE usuarios\nSET password_hash=BCrypt(nuevaPassword)
+      SVC -> PG : UPDATE password_reset_tokens\nSET usado=true, usado_en=NOW()
+      SVC -> RDS : DEL reset:{token}
+
+      SVC -> TOKEN : revocarTodosTokens(userId)
+      TOKEN -> PG : UPDATE tokens_sesion\nSET estado=REVOCADO_PASSWORD
+      TOKEN -> RDS : SET blacklist:{jti} TTL=exp-now
+      TOKEN -> RDS : DEL refresh:{userId}
+
+      SVC -> AUDIT : registrar(PASSWORD_RESET_OK)
+      AUDIT -> PG : INSERT audit_log
+
+      SVC --> CTR : OK
+      CTR --> ANG : 200\n{mensaje: "Password restablecido"}
+      ANG --> U : redirect /login
+    end
+  end
+end
+
+@enduml
+
+
+@startuml SEQ_08_Admin_Revocar_Sesiones
+!theme plain
+skinparam defaultFontSize 11
+skinparam sequenceArrowThickness 1.5
+skinparam responseMessageBelowArrow true
+
+title Secuencia 08 - Admin revoca todas las sesiones de un usuario
+
+actor "Admin" as ADM
+participant "Angular 20" as ANG
+participant "AdminController" as CTR
+participant "TokenService" as TOKEN
+participant "NotificationService" as NOTIF
+participant "AuditService" as AUDIT
+database "PostgreSQL" as PG
+database "Redis" as RDS
+
+ADM -> ANG : detecta acceso sospechoso\no cambia rol de usuario
+ANG -> CTR : DELETE /admin/usuarios/{id}/sesiones\nBearer JWT (rol=ADMIN)
+
+CTR -> CTR : verificar rol ADMIN\nen SecurityContext
+
+alt no es ADMIN
+  CTR --> ANG : 403 Forbidden
+
+else es ADMIN
+  CTR -> TOKEN : revocarTodosTokens(userId)
+  TOKEN -> PG : SELECT jti, expira_en\nFROM tokens_sesion\nWHERE user_id=?\nAND estado=ACTIVO
+
+  loop para cada token activo
+    TOKEN -> RDS : SET blacklist:{jti}\nTTL = expira_en - NOW()
+    TOKEN -> PG : UPDATE tokens_sesion\nSET estado=REVOCADO_ADMIN\nSET revocado_en=NOW()
+  end
+
+  TOKEN -> RDS : DEL refresh:{userId}
+  TOKEN -> PG : UPDATE tokens_sesion\nSET estado=REVOCADO_ADMIN\nWHERE userId AND tipo=REFRESH
+
+  TOKEN --> CTR : {tokensRevocados: N}
+
+  CTR -> NOTIF : notificar(userId, canal_default,\n"Tu sesion fue cerrada\npor el administrador")
+
+  CTR -> AUDIT : registrar(SESIONES_REVOCADAS_ADMIN)
+  AUDIT -> PG : INSERT audit_log\n{adminId, targetUserId\ntokensRevocados: N}
+
+  CTR --> ANG : 200\n{revocados: N, mensaje: "Sesiones cerradas"}
+  ANG --> ADM : confirmacion con N sesiones cerradas
+end
+
+@enduml
