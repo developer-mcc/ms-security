@@ -1,0 +1,50 @@
+name: CD QA
+
+on:
+  push:
+    branches:
+      - 'release/**'
+
+concurrency:
+  group: cd-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Extract Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Extract version from branch name
+        id: version
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          VERSION="${BRANCH#release/}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Extracted version: ${VERSION}"
+
+  build-push:
+    name: Build & Push QA
+    needs: prepare
+    uses: ./.github/workflows/reusable-build-and-push.yml
+    with:
+      image-tag: qa-${{ needs.prepare.outputs.version }}
+      environment: qa
+      spring-profile: qa
+    permissions:
+      contents: read
+      packages: write
+
+  deploy:
+    name: Deploy to QA
+    needs: [prepare, build-push]
+    runs-on: ubuntu-latest
+    environment: qa
+    steps:
+      - name: Placeholder - Deploy to QA
+        run: |
+          echo "============================================="
+          echo "  TODO: Agregar paso de deploy a QA"
+          echo "  Image: ghcr.io/${{ github.repository }}:qa-${{ needs.prepare.outputs.version }}"
+          echo "============================================="

@@ -1,0 +1,25 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+    defer-datasource-initialization: true
+  sql:
+    init:
+      mode: always
+
+app:
+  jwt:
+    private-key-path: classpath:keys/private.pem
+    public-key-path: classpath:keys/public.pem
+
+logging:
+  level:
+    pe.com.mcco: DEBUG
+    org.hibernate.SQL: DEBUG
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"

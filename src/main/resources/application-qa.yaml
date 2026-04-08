@@ -1,0 +1,23 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+  sql:
+    init:
+      mode: never
+
+app:
+  jwt:
+    private-key-path: file:${JWT_PRIVATE_KEY_PATH}
+    public-key-path: file:${JWT_PUBLIC_KEY_PATH}
+
+logging:
+  level:
+    pe.com.mcco: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics

@@ -1,0 +1,14 @@
+.git/
+.github/
+.gradle/
+.idea/
+build/
+postman/
+*.md
+*.iml
+*.iws
+*.ipr
+src/main/resources/keys/
+docker-compose*.yml
+.dockerignore
+.gitignore

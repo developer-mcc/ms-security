@@ -38,3 +38,10 @@ out/
 
 ### Markdown ###
 *.md
+
+### RSA Keys ###
+src/main/resources/keys/
+*.pem
+
+### Docker ###
+docker-compose.override.yml

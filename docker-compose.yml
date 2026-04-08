@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: sg-seguridad
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Admin2024
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sg-seguridad"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ms-security-net
+
+  ms-security:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/sg-seguridad
+      DB_USERNAME: postgres
+      DB_PASSWORD: Admin2024
+    volumes:
+      - ./src/main/resources/keys:/app/keys:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ms-security-net
+
+volumes:
+  pgdata:
+
+networks:
+  ms-security-net:
+    driver: bridge

@@ -7,15 +7,14 @@ spring:
     password: ${DB_PASSWORD:Admin2024}
   jpa:
     hibernate:
-      ddl-auto: create-drop
+      ddl-auto: validate
     open-in-view: false
-    defer-datasource-initialization: true
     properties:
       hibernate:
         default_schema: sec
   sql:
     init:
-      mode: always
+      mode: never
 
 # --- Cache provider ---
 # Cambiar a 'redis' cuando haya presupuesto y descomentar la dependencia en build.gradle
@@ -23,16 +22,16 @@ app:
   cache:
     provider: postgres
 
-  jwt:
-    private-key-path: classpath:keys/private.pem
-    public-key-path: classpath:keys/public.pem
-    access-token-expiration-minutes: 15
-    refresh-token-expiration-days: 7
-
   security:
     max-login-attempts: 5
     block-duration-minutes: 15
     rate-limit-requests-per-minute: 10
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
 
 # Redis: descomentar cuando se active provider=redis
 # spring.data.redis:

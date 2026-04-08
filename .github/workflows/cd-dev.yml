@@ -1,0 +1,40 @@
+name: CD Dev
+
+on:
+  push:
+    branches:
+      - develop
+
+concurrency:
+  group: cd-dev
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    name: Build & Push Dev
+    uses: ./.github/workflows/reusable-build-and-push.yml
+    with:
+      image-tag: dev
+      environment: dev
+      spring-profile: dev
+    permissions:
+      contents: read
+      packages: write
+
+  deploy:
+    name: Deploy to Dev
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Placeholder - Deploy to Dev
+        run: |
+          echo "============================================="
+          echo "  TODO: Agregar paso de deploy a Dev"
+          echo "  Image: ghcr.io/${{ github.repository }}:dev"
+          echo "============================================="
+          echo ""
+          echo "Opciones de deploy:"
+          echo "  - kubectl set image deployment/ms-security ..."
+          echo "  - aws ecs update-service ..."
+          echo "  - docker compose pull && docker compose up -d"
